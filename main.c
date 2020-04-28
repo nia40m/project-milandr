@@ -1,154 +1,358 @@
 #include "MDR32Fx.h"
 
-#include "string.h"
-#include "stdio.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "MDR32F9Qx_rst_clk.h"
 #include "MDR32F9Qx_port.h"
 #include "MDR32F9Qx_uart.h"
 #include "MDR32F9Qx_ssp.h"
+#include "MDR32F9Qx_it.h"
 
-void send_srting(char *str) {
-	int s = strlen(str);
-	int i;
+#define TO_STRING(x)        #x
+#define VAL_TO_STRING(x)    TO_STRING(x)
 
-	for (i = 0; i < s; i++) {
-		while (UART_GetFlagStatus (MDR_UART2, UART_FLAG_TXFE)!= SET);
-		UART_SendData(MDR_UART2, str[i]);
-	}
+#define MAJOR_VERSION       0
+#define MINOR_VERSION       0
+
+#define HELLO_STRING    \
+    "{\"name\":\"Milandr\",\"major\":"  \
+    VAL_TO_STRING(MAJOR_VERSION)        \
+    ",\"minor\":"                       \
+    VAL_TO_STRING(MINOR_VERSION)        \
+    "}\n"
+
+/****************************************\
+    COMMON functions
+\****************************************/
+static void delay(int time) {
+    time *= 2000ull;
+    while(time--);
 }
 
-void init_uart(void) {
-	UART_InitTypeDef UART_InitStruct;
-	PORT_InitTypeDef PortInit;
+/****************************************\
+    UART functions
+\****************************************/
+char in_buff[256];
+char pos;
+char ready_flag;
 
-  RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTF, ENABLE);
+void UART2_IRQHandler(void) {
+    static char state = 0;
 
-  PortInit.PORT_PULL_UP = PORT_PULL_UP_OFF;
-  PortInit.PORT_PULL_DOWN = PORT_PULL_DOWN_OFF;
-  PortInit.PORT_PD_SHM = PORT_PD_SHM_OFF;
-  PortInit.PORT_PD = PORT_PD_DRIVER;
-  PortInit.PORT_GFEN = PORT_GFEN_OFF;
-  PortInit.PORT_FUNC = PORT_FUNC_OVERRID;
-  PortInit.PORT_SPEED = PORT_SPEED_MAXFAST;
-  PortInit.PORT_MODE = PORT_MODE_DIGITAL;
+    while(UART_GetFlagStatus(MDR_UART2, UART_FLAG_RXFE) != SET) {
+        char c = UART_ReceiveData(MDR_UART2);
 
-  PortInit.PORT_OE = PORT_OE_OUT;
-  PortInit.PORT_Pin = PORT_Pin_1;
-  PORT_Init(MDR_PORTF, &PortInit);
+        if (c == '"') {
+            if (state) {
+                state = 0;
+                in_buff[pos] = 0;
+                ready_flag = 1;
+            } else {
+                ready_flag = 0;
+                pos = 0;
+                state = 1;
+            }
+            continue;
+        }
 
-  PortInit.PORT_OE = PORT_OE_IN;
-  PortInit.PORT_Pin = PORT_Pin_0;
-  PORT_Init(MDR_PORTF, &PortInit);
-
-  RST_CLK_PCLKcmd(RST_CLK_PCLK_UART2, ENABLE);
-
-	UART_BRGInit(MDR_UART2, UART_HCLKdiv1);
-
-	UART_InitStruct.UART_BaudRate = 230400;
-	UART_InitStruct.UART_WordLength = UART_WordLength8b;
-	UART_InitStruct.UART_StopBits = UART_StopBits2;
-	UART_InitStruct.UART_Parity = UART_Parity_No;
-	UART_InitStruct.UART_FIFOMode = UART_FIFO_OFF;
-	UART_InitStruct.UART_HardwareFlowControl =
-		UART_HardwareFlowControl_RXE | UART_HardwareFlowControl_TXE;
-
-	UART_Init(MDR_UART2, &UART_InitStruct);
-
-	UART_Cmd(MDR_UART2, ENABLE);
+        if (state) {
+            in_buff[pos++] = c;
+        }
+    }
 }
 
-void init_spi(void) {
-	RST_CLK_CPU_PLLconfig(RST_CLK_CPU_PLLsrcHSIdiv2,0);
-  RST_CLK_PCLKcmd((RST_CLK_PCLK_RST_CLK),ENABLE);
+static void send_string(char *str) {
+    int s = strlen(str);
+    int i;
 
-	SSP_InitTypeDef spi_initStruct;
-
-	PORT_InitTypeDef PortInit;
-
-  RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTD, ENABLE);
-
-	PORT_DeInit(MDR_PORTD);
-  PortInit.PORT_FUNC = PORT_FUNC_ALTER;
-  PortInit.PORT_SPEED = PORT_SPEED_FAST;
-  PortInit.PORT_MODE = PORT_MODE_DIGITAL;
-
-  PortInit.PORT_OE = PORT_OE_OUT;
-  PortInit.PORT_Pin = PORT_Pin_5 | PORT_Pin_6;
-  PORT_Init(MDR_PORTD, &PortInit);
-
-  PortInit.PORT_OE = PORT_OE_IN;
-  PortInit.PORT_Pin = PORT_Pin_2;
-  PORT_Init(MDR_PORTD, &PortInit);
-
-	RST_CLK_PCLKcmd(RST_CLK_PCLK_SSP2, ENABLE);
-
-	SSP_StructInit(&spi_initStruct);
-	SSP_BRGInit(MDR_SSP2, SSP_HCLKdiv32);
-	SSP_Init(MDR_SSP2, &spi_initStruct);
-	SSP_Cmd(MDR_SSP2, ENABLE);
+    for (i = 0; i < s; i++) {
+        while (UART_GetFlagStatus(MDR_UART2, UART_FLAG_TXFF) == SET);
+        UART_SendData(MDR_UART2, str[i]);
+    }
 }
 
+static void init_uart(void) {
+    UART_InitTypeDef UART_InitStruct;
+    PORT_InitTypeDef PortInit;
+
+    // настройка gpio МК для работы uart
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTF, ENABLE);
+
+    PortInit.PORT_PULL_UP = PORT_PULL_UP_OFF;
+    PortInit.PORT_PULL_DOWN = PORT_PULL_DOWN_OFF;
+    PortInit.PORT_PD_SHM = PORT_PD_SHM_OFF;
+    PortInit.PORT_PD = PORT_PD_DRIVER;
+    PortInit.PORT_GFEN = PORT_GFEN_OFF;
+    PortInit.PORT_FUNC = PORT_FUNC_OVERRID;
+    PortInit.PORT_SPEED = PORT_SPEED_MAXFAST;
+    PortInit.PORT_MODE = PORT_MODE_DIGITAL;
+
+    PortInit.PORT_OE = PORT_OE_OUT;
+    PortInit.PORT_Pin = PORT_Pin_1;
+    PORT_Init(MDR_PORTF, &PortInit);
+
+    PortInit.PORT_OE = PORT_OE_IN;
+    PortInit.PORT_Pin = PORT_Pin_0;
+    PORT_Init(MDR_PORTF, &PortInit);
+
+    // настройка контроллера uart
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_UART2, ENABLE);
+
+    UART_BRGInit(MDR_UART2, UART_HCLKdiv1);
+
+    // скорость передачи
+    UART_InitStruct.UART_BaudRate = 230400;
+    // длина передаваемых данных за раз
+    UART_InitStruct.UART_WordLength = UART_WordLength8b;
+    // количество стоп-битов
+    UART_InitStruct.UART_StopBits = UART_StopBits2;
+    // режим четности
+    UART_InitStruct.UART_Parity = UART_Parity_No;
+    // включение использования FIFO
+    UART_InitStruct.UART_FIFOMode = UART_FIFO_ON;
+    // включение передатчика и приемника
+    UART_InitStruct.UART_HardwareFlowControl =
+        UART_HardwareFlowControl_RXE | UART_HardwareFlowControl_TXE;
+
+    UART_Init(MDR_UART2, &UART_InitStruct);
+
+    // запуск uart
+    UART_Cmd(MDR_UART2, ENABLE);
+
+    pos = 0;
+    ready_flag = 0;
+    UART_DMAConfig(MDR_UART2, UART_IT_FIFO_LVL_2words, UART_IT_FIFO_LVL_2words);
+    NVIC_EnableIRQ(UART2_IRQn);
+    UART_ITConfig(MDR_UART2, UART_IT_RX, ENABLE);
+}
+
+
+/****************************************\
+    SPI functions
+\****************************************/
+static void init_spi(void) {
+    PORT_InitTypeDef PortInit;
+    SSP_InitTypeDef spi_initStruct;
+
+    // инициализация тактирования
+    RST_CLK_CPU_PLLconfig(RST_CLK_CPU_PLLsrcHSIdiv2, 0);
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_RST_CLK, ENABLE);
+
+    // инициализация gpio МК для SPI
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTD, ENABLE);
+
+    PORT_DeInit(MDR_PORTD);
+    PortInit.PORT_FUNC = PORT_FUNC_ALTER;
+    PortInit.PORT_SPEED = PORT_SPEED_FAST;
+    PortInit.PORT_MODE = PORT_MODE_DIGITAL;
+
+    PortInit.PORT_OE = PORT_OE_OUT;
+    PortInit.PORT_Pin = PORT_Pin_5 | PORT_Pin_6;
+    PORT_Init(MDR_PORTD, &PortInit);
+
+    PortInit.PORT_OE = PORT_OE_IN;
+    PortInit.PORT_Pin = PORT_Pin_2;
+    PORT_Init(MDR_PORTD, &PortInit);
+
+    // инициализация SPI
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_SSP2, ENABLE);
+
+    SSP_StructInit(&spi_initStruct);
+    SSP_BRGInit(MDR_SSP2, SSP_HCLKdiv32);
+    SSP_Init(MDR_SSP2, &spi_initStruct);
+    SSP_Cmd(MDR_SSP2, ENABLE);
+}
+
+/****************************************\
+    GPIO functions
+\****************************************/
+static void init_gpio(void) {
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTB, ENABLE);
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTC, ENABLE);
+    RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTD, ENABLE);
+
+    PORT_InitTypeDef PortInit;
+    PortInit.PORT_PULL_UP = PORT_PULL_UP_OFF;
+    PortInit.PORT_PULL_DOWN = PORT_PULL_DOWN_OFF;
+    PortInit.PORT_PD_SHM = PORT_PD_SHM_OFF;
+    PortInit.PORT_PD = PORT_PD_DRIVER;
+    PortInit.PORT_GFEN = PORT_GFEN_OFF;
+    PortInit.PORT_FUNC = PORT_FUNC_PORT;
+    PortInit.PORT_SPEED = PORT_SPEED_MAXFAST;
+    PortInit.PORT_MODE = PORT_MODE_DIGITAL;
+    PortInit.PORT_OE = PORT_OE_OUT;
+
+    PortInit.PORT_Pin = PORT_Pin_0 | PORT_Pin_1 | PORT_Pin_3 | PORT_Pin_4;
+    PORT_Init(MDR_PORTD, &PortInit);
+
+    PortInit.PORT_Pin = PORT_Pin_0 | PORT_Pin_1 | PORT_Pin_2 | PORT_Pin_3 |
+        PORT_Pin_4 | PORT_Pin_5 | PORT_Pin_6 | PORT_Pin_7 | PORT_Pin_8 |
+        PORT_Pin_9 | PORT_Pin_10;
+    PORT_Init(MDR_PORTB, &PortInit);
+
+    PortInit.PORT_Pin = PORT_Pin_0 | PORT_Pin_1 | PORT_Pin_2 | PORT_Pin_3;
+    PORT_Init(MDR_PORTC, &PortInit);
+}
+
+/****************************************\
+    Module functions
+\****************************************/
+#define SPI_CLK_PORT    MDR_PORTD
+#define SPI_CLK_NUM     PORT_Pin_5
+
+#define SPI_RX_PORT     MDR_PORTD
+#define SPI_RX_NUM      PORT_Pin_2
+
+#define SPI_TX_PORT     MDR_PORTD
+#define SPI_TX_NUM      PORT_Pin_6
+
+#define SPI_SS_PORT     MDR_PORTB
+#define SPI_SS_NUM      PORT_Pin_0
+
+#define SPI_SELECT_PORT MDR_PORTD
+#define SPI_SELECT_N_1  PORT_Pin_0
+#define SPI_SELECT_N_2  PORT_Pin_3
+#define SPI_SELECT_N_3  PORT_Pin_4
+
+#define OBJECT_ID_PORT  MDR_PORTB
+#define OBJECT_ID_N_1   PORT_Pin_2
+#define OBJECT_ID_N_2   PORT_Pin_4
+#define OBJECT_ID_N_3   PORT_Pin_6
+#define OBJECT_ID_N_4   PORT_Pin_8
+
+#define OBJECT_START_PORT   MDR_PORTB
+#define OBJECT_START_NUM    PORT_Pin_10
+
+#define OBJECT_NEXT_PORT    MDR_PORTC
+#define OBJECT_NEXT_NUM     PORT_Pin_1
+
+/****************************************\
+    main function
+\****************************************/
 int main(void) {
-	SystemInit();
-	init_uart();
-	init_spi();
+    SystemInit();
 
-	RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTB, ENABLE);
-	RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTC, ENABLE);
-	RST_CLK_PCLKcmd(RST_CLK_PCLK_PORTD, ENABLE);
+    // инициализация используемых контроллеров и gpio
+    init_uart();
+    init_spi();
+    init_gpio();
 
-	PORT_InitTypeDef PortInit;
-	PortInit.PORT_PULL_UP = PORT_PULL_UP_OFF;
-  PortInit.PORT_PULL_DOWN = PORT_PULL_DOWN_OFF;
-  PortInit.PORT_PD_SHM = PORT_PD_SHM_OFF;
-  PortInit.PORT_PD = PORT_PD_DRIVER;
-  PortInit.PORT_GFEN = PORT_GFEN_OFF;
-  PortInit.PORT_FUNC = PORT_FUNC_PORT;
-  PortInit.PORT_SPEED = PORT_SPEED_MAXFAST;
-  PortInit.PORT_MODE = PORT_MODE_DIGITAL;
+    // ожидание ответа от ПК
+    while (1) {
+        send_string(HELLO_STRING);
+        delay(2000);
 
-	PortInit.PORT_OE = PORT_OE_OUT;
-  PortInit.PORT_Pin = PORT_Pin_0|PORT_Pin_1|PORT_Pin_3|PORT_Pin_4;
-	PORT_Init(MDR_PORTD, &PortInit);
+        if (ready_flag) {
+            if (!strcmp(in_buff, "Connected")) {
+                break;
+            }
+            ready_flag = 0;
+        }
+    }
 
-	PortInit.PORT_Pin = PORT_Pin_0|PORT_Pin_1|PORT_Pin_2|PORT_Pin_3|PORT_Pin_4|PORT_Pin_5|PORT_Pin_6|PORT_Pin_7|PORT_Pin_8|PORT_Pin_9|PORT_Pin_10;
-	PORT_Init(MDR_PORTB, &PortInit);
+    // собрать информацию о подключенных датчиках
+    char ids[8] = {0};
+    char detected = 0;
 
-	PortInit.PORT_Pin = PORT_Pin_0|PORT_Pin_1|PORT_Pin_2|PORT_Pin_3;
-	PORT_Init(MDR_PORTC, &PortInit);
+    PORT_SetBits(OBJECT_START_PORT, OBJECT_START_NUM);
+    PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+    delay_us(2);
+    PORT_ResetBits(OBJECT_START_PORT, OBJECT_START_NUM);
 
-	send_srting("Started\n");
-	char a = 0;
-	char b;
-	char c;
-	while (1) {
-		//PORT_Write(MDR_PORTD, a % 2? 0xffff:0);
-		//PORT_Write(MDR_PORTB, a % 2? 0xffff:0);
-		//PORT_Write(MDR_PORTC, a % 2? 0xffff:0);
+    for (int i = 0; i < 8; i++) {
+        input_values[i] = -1;
 
-		PORT_Write(MDR_PORTD, 8);
+        ids[i] = 0;
 
-		for (int i = 0; i < 10000ull; i++);
+        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_1) << 0;
+        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_2) << 1;
+        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_3) << 2;
+        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_4) << 3;
 
-		while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_TFE)!= SET);
-		SSP_SendData(MDR_SSP2, a);
+        if (!ids[i]) {
+            continue;
+        }
 
-		PORT_Write(MDR_PORTD, 0);
+        detected++;
+        PORT_ResetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+        delay_us(2);
+        PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+    }
 
-		while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_RNE)!= SET);
-		b = SSP_ReceiveData(MDR_SSP2);
+    // отправка данных
+    char resp[256] = {0};
+    char curr = 0;
+    curr = snprintf(resp + curr, 256 - curr, "{\"num\":%u,\"types\":[", detected);
+    for (int i = 0; i < 8; i++) {
+        curr += snprintf(resp + curr, 256 - curr, "%u,", ids[i]);
+    }
+    // убираем лишнюю запятую
+    curr--;
+    snprintf(resp + curr, 256 - curr, "]}\n");
 
-		if (b != a + 9) {
-			c = 0;
-		} else {
-			c = 1;
-		}
+    send_string(resp);
 
-		char buf[50];
-		snprintf(buf,50, "%3u Hello world! %3u\n", a++, c);
-		send_srting(buf);
+    // ожидание подтверждение от ПК
+    while (1) {
+        if (ready_flag) {
+            if (!strcmp(in_buff, "Ready")) {
+                break;
+            }
+            ready_flag = 0;
+        }
+    }
 
-		for (int i = 0; i < 500000ull; i++);
-	}
+    // цикл опроса
+    while (1) {
+        for (int i = 0; i < 8; i++) {
+            uint16_t value;
+
+            if (!ids[i]) {
+                continue;
+            }
+
+            uint32_t reg = PORT_ReadInputData(SPI_SELECT_PORT);
+
+            if (ids[i] & (1<<0)) {
+                reg |= SPI_SELECT_N_1;
+            } else {
+                reg &= ~(uint32_t)SPI_SELECT_N_1;
+            }
+
+            if (ids[i] & (1<<1)) {
+                reg |= SPI_SELECT_N_2;
+            } else {
+                reg &= ~(uint32_t)SPI_SELECT_N_2;
+            }
+
+            if (ids[i] & (1<<2)) {
+                reg |= SPI_SELECT_N_3;
+            } else {
+                reg &= ~(uint32_t)SPI_SELECT_N_3;
+            }
+
+            PORT_Write(SPI_SELECT_PORT, reg);
+
+            PORT_SetBits(SPI_SS_PORT, SPI_SS_NUM);
+
+            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_TFE) != SET);
+            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
+
+            // start clock by sending 1 byte
+            SSP_SendData(MDR_SSP2, 0);
+
+            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
+            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_RNE) != SET);
+
+            PORT_ResetBits(SPI_SS_PORT, SPI_SS_NUM);
+
+            value = SSP_ReceiveData(MDR_SSP2);
+
+            char data[32];
+            snprintf(data, 32, "{\"%u\":%u}\n", i + 1, value);
+            send_string(data);
+        }
+    }
 }
