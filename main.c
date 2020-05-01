@@ -14,7 +14,7 @@
 #define VAL_TO_STRING(x)    TO_STRING(x)
 
 #define MAJOR_VERSION       0
-#define MINOR_VERSION       0
+#define MINOR_VERSION       1
 
 #define HELLO_STRING    \
     "{\"name\":\"Milandr\",\"major\":"  \
@@ -26,7 +26,12 @@
 /****************************************\
     COMMON functions
 \****************************************/
-static void delay(int time) {
+static void delay_us(int time) {
+    time *= 2ull;
+    while(time--);
+}
+
+static void delay_ms(int time) {
     time *= 2000ull;
     while(time--);
 }
@@ -228,6 +233,75 @@ static void init_gpio(void) {
 #define OBJECT_NEXT_PORT    MDR_PORTC
 #define OBJECT_NEXT_NUM     PORT_Pin_1
 
+char module_get_object_id(void) {
+    char n = 0;
+
+    n |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_1) << 0;
+    n |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_2) << 1;
+    n |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_3) << 2;
+    n |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_4) << 3;
+
+    return n;
+}
+
+void module_set_object_num(int num) {
+    uint32_t reg = PORT_ReadInputData(SPI_SELECT_PORT);
+
+    if (num & (1<<0)) {
+        reg |= SPI_SELECT_N_1;
+    } else {
+        reg &= ~(uint32_t)SPI_SELECT_N_1;
+    }
+
+    if (num & (1<<1)) {
+        reg |= SPI_SELECT_N_2;
+    } else {
+        reg &= ~(uint32_t)SPI_SELECT_N_2;
+    }
+
+    if (num & (1<<2)) {
+        reg |= SPI_SELECT_N_3;
+    } else {
+        reg &= ~(uint32_t)SPI_SELECT_N_3;
+    }
+
+    PORT_Write(SPI_SELECT_PORT, reg);
+}
+
+uint16_t module_exchange_object_val(uint16_t new) {
+    PORT_SetBits(SPI_SS_PORT, SPI_SS_NUM);
+
+    while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_TFE) != SET);
+    while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
+
+    // start clock by sending 1 byte
+    SSP_SendData(MDR_SSP2, new);
+
+    while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
+    while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_RNE) != SET);
+
+    PORT_ResetBits(SPI_SS_PORT, SPI_SS_NUM);
+
+    return SSP_ReceiveData(MDR_SSP2);
+}
+
+void module_cnt_start(void) {
+    PORT_SetBits(OBJECT_START_PORT, OBJECT_START_NUM);
+    PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+    delay_us(2);
+    PORT_ResetBits(OBJECT_START_PORT, OBJECT_START_NUM);
+}
+
+void module_cnt_next(void) {
+    PORT_ResetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+    delay_us(2);
+    PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+}
+
+int module_object_has_input(char id) {
+    return id % 2;
+}
+
 /****************************************\
     main function
 \****************************************/
@@ -242,7 +316,7 @@ int main(void) {
     // ожидание ответа от ПК
     while (1) {
         send_string(HELLO_STRING);
-        delay(2000);
+        delay_ms(2000);
 
         if (ready_flag) {
             if (!strcmp(in_buff, "Connected")) {
@@ -256,29 +330,18 @@ int main(void) {
     char ids[8] = {0};
     char detected = 0;
 
-    PORT_SetBits(OBJECT_START_PORT, OBJECT_START_NUM);
-    PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
-    delay_us(2);
-    PORT_ResetBits(OBJECT_START_PORT, OBJECT_START_NUM);
+    module_cnt_start();
 
     for (int i = 0; i < 8; i++) {
         input_values[i] = -1;
-
-        ids[i] = 0;
-
-        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_1) << 0;
-        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_2) << 1;
-        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_3) << 2;
-        ids[i] |= PORT_ReadInputDataBit(OBJECT_ID_PORT, OBJECT_ID_N_4) << 3;
+        ids[i] = module_get_object_id();
 
         if (!ids[i]) {
             continue;
         }
 
         detected++;
-        PORT_ResetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
-        delay_us(2);
-        PORT_SetBits(OBJECT_NEXT_PORT, OBJECT_NEXT_NUM);
+        module_cnt_next();
     }
 
     // отправка данных
@@ -313,44 +376,10 @@ int main(void) {
                 continue;
             }
 
-            uint32_t reg = PORT_ReadInputData(SPI_SELECT_PORT);
-
-            if (ids[i] & (1<<0)) {
-                reg |= SPI_SELECT_N_1;
-            } else {
-                reg &= ~(uint32_t)SPI_SELECT_N_1;
-            }
-
-            if (ids[i] & (1<<1)) {
-                reg |= SPI_SELECT_N_2;
-            } else {
-                reg &= ~(uint32_t)SPI_SELECT_N_2;
-            }
-
-            if (ids[i] & (1<<2)) {
-                reg |= SPI_SELECT_N_3;
-            } else {
-                reg &= ~(uint32_t)SPI_SELECT_N_3;
-            }
-
-            PORT_Write(SPI_SELECT_PORT, reg);
-
-            PORT_SetBits(SPI_SS_PORT, SPI_SS_NUM);
-
-            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_TFE) != SET);
-            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
-
-            // start clock by sending 1 byte
-            SSP_SendData(MDR_SSP2, 0);
-
-            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_BSY) == SET);
-            while (SSP_GetFlagStatus(MDR_SSP2, SSP_FLAG_RNE) != SET);
-
-            PORT_ResetBits(SPI_SS_PORT, SPI_SS_NUM);
-
-            value = SSP_ReceiveData(MDR_SSP2);
+            module_set_object_num(i);
 
             char data[32];
+            value = module_exchange_object_val(0);
             snprintf(data, 32, "{\"%u\":%u}\n", i + 1, value);
             send_string(data);
         }
