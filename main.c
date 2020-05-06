@@ -14,7 +14,7 @@
 #define VAL_TO_STRING(x)    TO_STRING(x)
 
 #define MAJOR_VERSION       0
-#define MINOR_VERSION       1
+#define MINOR_VERSION       2
 
 #define HELLO_STRING    \
     "{\"name\":\"Milandr\",\"major\":"  \
@@ -42,8 +42,15 @@ static void delay_ms(int time) {
 char in_buff[256];
 char pos;
 char ready_flag;
+int16_t input_values[8];
+
+void (*uart_handler)(void) = NULL;
 
 void UART2_IRQHandler(void) {
+    uart_handler();
+}
+
+void start_handler(void) {
     static char state = 0;
 
     while(UART_GetFlagStatus(MDR_UART2, UART_FLAG_RXFE) != SET) {
@@ -66,6 +73,28 @@ void UART2_IRQHandler(void) {
             in_buff[pos++] = c;
         }
     }
+}
+
+void input_handler(void) {
+    char *value;
+
+    while(UART_GetFlagStatus(MDR_UART2, UART_FLAG_RXFE) != SET) {
+        in_buff[pos++] = UART_ReceiveData(MDR_UART2);
+    }
+
+    if (in_buff[pos - 1] != '\n') {
+        return;
+    }
+
+    if (in_buff[0] == '{' && in_buff[1] == '"' && (value = strchr(in_buff, ':'))) {
+        uint8_t num = strtol(in_buff + 2, NULL, 10);
+
+        if (--num < 8) {
+            input_values[num] = strtol(value, NULL, 10);
+        }
+    }
+
+    pos = 0;
 }
 
 static void send_string(char *str) {
@@ -128,6 +157,7 @@ static void init_uart(void) {
 
     pos = 0;
     ready_flag = 0;
+    uart_handler = start_handler;
     UART_DMAConfig(MDR_UART2, UART_IT_FIFO_LVL_2words, UART_IT_FIFO_LVL_2words);
     NVIC_EnableIRQ(UART2_IRQn);
     UART_ITConfig(MDR_UART2, UART_IT_RX, ENABLE);
@@ -367,6 +397,10 @@ int main(void) {
         }
     }
 
+    // меняем обработчик
+    pos = 0;
+    uart_handler = input_handler;
+
     // цикл опроса
     while (1) {
         for (int i = 0; i < 8; i++) {
@@ -378,10 +412,16 @@ int main(void) {
 
             module_set_object_num(i);
 
-            char data[32];
-            value = module_exchange_object_val(0);
-            snprintf(data, 32, "{\"%u\":%u}\n", i + 1, value);
-            send_string(data);
+            if (module_object_has_input(ids[i])) {
+                if (input_values[i] != -1) {
+                    module_exchange_object_val(input_values[i]);
+                }
+            } else {
+                char data[32];
+                value = module_exchange_object_val(0);
+                snprintf(data, 32, "{\"%u\":%u}\n", i + 1, value);
+                send_string(data);
+            }
         }
     }
 }
